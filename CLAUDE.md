@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-漏洞智能客服 — A RAG-based vulnerability intelligence Q&A system using Milvus vector database, LangChain, and LLM. Supports hybrid search (dense vector + BM25 sparse), multi-format data ingestion, and conversational retrieval.
+漏洞智能客服 — A RAG-based vulnerability intelligence Q&A system using Milvus vector database, LangChain, and LLM. Supports hybrid search (dense vector + BM25 sparse), multi-format data ingestion, and conversational retrieval with session memory.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ cd backend
 uv sync
 
 # Run development server with hot reload
-uv run uvicorn src.api.main:app --reload
+uv run uvicorn src.api.main:app --reload --port 8000
 
 # Run all tests
 uv run pytest
@@ -80,13 +80,15 @@ docker-compose up -d
 | Module | Purpose |
 |--------|---------|
 | `src/core/config.py` | Settings via Pydantic — Milvus URI, LLM API keys, model names, collection names |
-| `src/core/embeddings.py` | `embedding_service` — wraps Ollama embedding API or local model |
+| `src/core/embeddings.py` | `embedding_service` — wraps Ollama embedding API |
 | `src/core/vector_store.py` | `vector_store_service` — Milvus connection and health checks |
 | `src/core/prompt.py` | Chat prompt template for vulnerability Q&A |
 | `src/services/search.py` | `SearchService` (hybrid BM25 + dense RRF search) + `ChatService` (LLM chain) |
 | `src/services/ingest.py` | `IngestService` — document loading, chunking, Milvus ingestion |
 | `src/services/session_store.py` | SQLite-based session persistence |
-| `src/api/routers/chat.py` | `/api/chat` endpoint with session support |
+| `src/services/sqlite_store.py` | `memory_store` — key-value store for long-term memory (summary, facts, preferences) |
+| `src/services/memory_service.py` | `memory_service` — LLM-powered conversation summarization and fact extraction |
+| `src/api/routers/chat.py` | `/api/chat` endpoint with streaming support and session memory |
 | `src/api/routers/ingest.py` | `/api/ingest` endpoint for file uploads |
 | `src/models/schemas.py` | Pydantic models: `SourceDoc`, `ChatRequest`, `ChatResponse`, `HealthResponse` |
 
@@ -98,6 +100,16 @@ docker-compose up -d
 3. **RRF fusion** — `score = 1/(k + dense_rank) + 1/(k + bm25_rank)` with `k=60`
 
 The `_hybrid_search` method auto-detects collection schema (text field, vector field, metric type, primary key).
+
+## Memory Architecture
+
+`MemoryService` provides long-term conversation memory:
+1. **Summary** — LLM-generated conversation summary (when `MEMORY_SUMMARY_ENABLED=true`)
+2. **Facts** — Extracted key-value pairs (user name, vulnerabilities discussed, products mentioned)
+3. **Preferences** — User preference list
+4. **Recent window** — Last N messages for immediate context
+
+Memory is persisted via `sqlite_store.py` (a key-value store backed by SQLite).
 
 ## Vector Store Schema
 
@@ -117,13 +129,15 @@ Key variables in `.env`:
 - `DEFAULT_COLLECTION` — Default Milvus collection (default: `vuln_kb`)
 - `TOP_K` — Retrieval return count (default: `5`)
 - `SESSION_DB_PATH` — SQLite session storage path (default: `data/sessions.db`)
-- `SESSION_MAX_HISTORY` — Max chat history messages per session (default: `20`)
+- `SESSION_MAX_HISTORY` — Max chat history messages per session (default: `100`)
+- `MEMORY_WINDOW_SIZE` — Window for recent messages in memory context (default: `4`)
+- `MEMORY_SUMMARY_ENABLED` — Enable LLM-generated conversation summary (default: `true`)
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/chat` | POST | Send message, returns answer + sources |
+| `/api/chat` | POST | Send message, returns answer + sources (supports streaming) |
 | `/api/chat/history/{session_id}` | GET | Get session chat history |
 | `/api/ingest` | POST | Upload document (multipart) |
 | `/api/health` | GET | Health check with Milvus connection status |
@@ -138,3 +152,14 @@ Key variables in `.env`:
 - `.db` / `.sqlite` / `.sqlite3` — SQLite database tables
 
 `ingest_plugins.py` is specialized for plugin XML with dense + sparse vector generation.
+
+## Frontend Structure
+
+```
+frontend/src/
+├── api/          # API client functions
+├── components/   # React components
+├── stores/       # Zustand state stores
+├── App.tsx       # Main app component
+└── main.tsx      # Entry point
+```
