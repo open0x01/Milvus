@@ -2,9 +2,13 @@ from langchain_openai import ChatOpenAI
 from pymilvus import MilvusClient
 from rank_bm25 import BM25Okapi
 import numpy as np
+from typing import AsyncGenerator
 from src.core.embeddings import embedding_service
 from src.core.config import settings
+from src.core.logger import get_logger
 from src.models.schemas import SourceDoc
+
+logger = get_logger(__name__)
 
 
 class SearchService:
@@ -189,19 +193,32 @@ class SearchService:
 
         collection = settings.DEFAULT_COLLECTION
 
-        if hybrid:
-            return self._hybrid_search(query, collection, top_k)
-        else:
-            vector_store = self.get_vector_store()
-            docs = vector_store.similarity_search_with_score(query, k=top_k)
-            sources = []
-            for doc, score in docs:
-                sources.append(SourceDoc(
-                    content=doc.page_content,
-                    source=doc.metadata.get("source", "unknown"),
-                    score=round(score, 4)
-                ))
-            return sources
+        try:
+            client = self._get_milvus_client()
+            if not client.has_collection(collection):
+                logger.warning(f"Collection '{collection}' does not exist, skipping search")
+                return []
+        except Exception as e:
+            logger.warning(f"Failed to check collection existence: {e}")
+            return []
+
+        try:
+            if hybrid:
+                return self._hybrid_search(query, collection, top_k)
+            else:
+                vector_store = self.get_vector_store()
+                docs = vector_store.similarity_search_with_score(query, k=top_k)
+                sources = []
+                for doc, score in docs:
+                    sources.append(SourceDoc(
+                        content=doc.page_content,
+                        source=doc.metadata.get("source", "unknown"),
+                        score=round(score, 4)
+                    ))
+                return sources
+        except Exception as e:
+            logger.warning(f"Search failed for collection '{collection}': {e}")
+            return []
 
 
 class ChatService:
@@ -210,22 +227,25 @@ class ChatService:
             model=settings.OPENAI_MODEL,
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_API_BASE,
-            temperature=0
+            temperature=0,
+            streaming=True
         )
         self.search_service = SearchService()
 
-    def chat(self, question: str, chat_history: list[dict] = None, top_k: int = None):
+    def chat(self, question: str, chat_history: list[dict] = None, top_k: int = None, session_id: str = None, user_id: str = None):
         if chat_history is None:
             chat_history = []
 
         docs = self.search_service.similarity_search(question, top_k or settings.TOP_K)
 
         context = "\n\n".join([doc.content for doc in docs])
-        history_text = "\n".join([f"用户: {msg['content']}" for msg in chat_history if msg.get("role") == "user"])
+
+        from src.services.memory_service import memory_service
+        memory_context = memory_service.build_memory_context(session_id, chat_history, user_id=user_id)
 
         prompt = self._get_prompt().invoke({
             "context": context,
-            "chat_history": history_text,
+            "chat_history": memory_context,
             "question": question
         })
 
@@ -244,15 +264,57 @@ class ChatService:
             "sources": sources
         }
 
+    async def chat_stream(self, question: str, chat_history: list[dict] = None, top_k: int = None, session_id: str = None, user_id: str = None) -> AsyncGenerator[dict, None]:
+        if chat_history is None:
+            chat_history = []
+
+        docs = self.search_service.similarity_search(question, top_k or settings.TOP_K)
+
+        context = "\n\n".join([doc.content for doc in docs])
+
+        from src.services.memory_service import memory_service
+        memory_context = memory_service.build_memory_context(session_id, chat_history, user_id=user_id)
+
+        prompt_value = self._get_prompt().invoke({
+            "context": context,
+            "chat_history": memory_context,
+            "question": question
+        })
+
+        sources = [
+            SourceDoc(content=doc.content, source=doc.source, score=doc.score)
+            for doc in docs
+        ]
+
+        yield {
+            "type": "sources",
+            "sources": [s.model_dump() for s in sources]
+        }
+
+        full_answer = ""
+        async for chunk in self.llm.astream(prompt_value):
+            token = chunk.content if hasattr(chunk, 'content') else str(chunk)
+            if token:
+                full_answer += token
+                yield {
+                    "type": "token",
+                    "content": token
+                }
+
+        yield {
+            "type": "done",
+            "answer": full_answer
+        }
+
     def _get_prompt(self):
         from langchain_core.prompts import ChatPromptTemplate
 
-        template = """你是一个专业的漏洞安全智能客服助手。请根据提供的漏洞参考文档回答用户关于安全漏洞的问题。
+        template = """你是一个专业的漏洞安全智能客服助手。请根据提供的漏洞参考文档和对话记忆回答用户关于安全漏洞的问题。
 
 参考文档:
 {context}
 
-对话历史:
+对话记忆:
 {chat_history}
 
 当前问题: {question}
@@ -261,9 +323,10 @@ class ChatService:
 1. 只根据提供的参考文档回答，不要编造信息
 2. 如果参考文档中没有相关信息，请明确告知用户
 3. 回答要准确、专业、友好
-4. 保持对话的连贯性
-5. 回答漏洞相关问题时，请包含：漏洞名称、影响产品、漏洞类型、危险等级、CVSS评分、漏洞描述、修复建议等信息
-6. 如果用户询问某个产品的漏洞，请列出相关的所有漏洞
+4. 充分利用对话记忆中的历史信息，保持对话的连贯性和上下文理解
+5. 如果用户追问之前讨论过的漏洞，请结合记忆中的信息继续深入回答
+6. 回答漏洞相关问题时，请包含：漏洞名称、影响产品、漏洞类型、危险等级、CVSS评分、漏洞描述、修复建议等信息
+7. 如果用户询问某个产品的漏洞，请列出相关的所有漏洞
 
 回答:"""
 

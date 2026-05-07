@@ -37,7 +37,11 @@ class Settings(BaseSettings):
     # 会话配置
     SESSION_EXPIRE_SECONDS: int = int(os.getenv("SESSION_EXPIRE_SECONDS", "3600"))
     SESSION_DB_PATH: str = os.getenv("SESSION_DB_PATH", "data/sessions.db")
-    SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "20"))
+    SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "100"))
+
+    # 长期记忆配置
+    MEMORY_WINDOW_SIZE: int = int(os.getenv("MEMORY_WINDOW_SIZE", "4"))
+    MEMORY_SUMMARY_ENABLED: bool = os.getenv("MEMORY_SUMMARY_ENABLED", "true").lower() == "true"
 
     class Config:
         env_file = ".env"

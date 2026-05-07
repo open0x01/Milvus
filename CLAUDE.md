@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RAG智能客服助手 — A RAG (Retrieval-Augmented Generation) customer service system using Milvus vector database, LangChain, and LLM (GPT-4o/Claude 3.5/MiniMax).
+漏洞智能客服 — A RAG-based vulnerability intelligence Q&A system using Milvus vector database, LangChain, and LLM. Supports hybrid search (dense vector + BM25 sparse), multi-format data ingestion, and conversational retrieval.
 
 ## Architecture
 
@@ -14,18 +14,20 @@ RAG智能客服助手 — A RAG (Retrieval-Augmented Generation) customer servic
 │   (React)   │◀────│  (FastAPI)  │◀────│  (VectorDB) │
 └─────────────┘     └─────────────┘     └─────────────┘
                           │
-                          ▼
-                    ┌─────────────┐
-                    │  LLM API    │
-                    │ (MiniMax)   │
-                    └─────────────┘
+                    ┌─────┴─────┐
+                    ▼           ▼
+              ┌──────────┐ ┌──────────┐
+              │ Ollama   │ │  LLM API │
+              │(Embedding)│ │(MiniMax)│
+              └──────────┘ └──────────┘
 ```
 
-- **Frontend**: React 18 + Vite + Tailwind + Zustand (state management)
-- **Backend**: FastAPI with LangChain, routes in `src/api/routers/`
-- **Vector Store**: Milvus 2.5 with etcd (HNSW index, COSINE metric)
-- **Embeddings**: BGE-M3 model (FlagEmbedding) — generates both dense + sparse vectors
+- **Frontend**: React 19 + TypeScript + Tailwind + Zustand
+- **Backend**: FastAPI + LangChain, routes in `src/api/routers/`
+- **Vector Store**: Milvus 2.5 (HNSW index, COSINE metric)
+- **Embeddings**: Ollama (default, `qwen3-embedding:0.6b-q8_0`) or local model
 - **LLM**: Configurable (default MiniMax via OpenAI-compatible API)
+- **Session Storage**: SQLite (`data/sessions.db`)
 
 ## Commands
 
@@ -39,7 +41,7 @@ uv sync
 # Run development server with hot reload
 uv run uvicorn src.api.main:app --reload
 
-# Run tests
+# Run all tests
 uv run pytest
 
 # Run a single test file
@@ -57,13 +59,13 @@ npm run dev
 ```bash
 cd backend
 
-# Import directory of documents (auto-detects format: pdf, docx, txt, xml, json, md, sqlite)
-python scripts/ingest_data.py --path ./data/docs --collection customer_service_kb
+# Generic document ingestion (pdf, docx, txt, xml, json, md, sqlite)
+python scripts/ingest_data.py --path ./data/docs --collection my_kb
 
-# Import Gatling plugins XML (dense + sparse vectors)
-python scripts/ingest_data.py --path ./plugins.xml --collection plugins
+# Plugin-specific ingestion with dense + sparse dual vectors
+python scripts/ingest_plugins.py --path ./data/plugins.xml --collection vuln_kb
 
-# Import with custom chunking
+# Custom chunking parameters
 python scripts/ingest_data.py --path ./data/docs --collection kb --chunk-size 512 --chunk-overlap 100
 ```
 
@@ -77,19 +79,32 @@ docker-compose up -d
 
 | Module | Purpose |
 |--------|---------|
-| `src/core/config.py` | Settings via Pydantic (Milvus URI, LLM API keys, model names) |
-| `src/core/embeddings.py` | `BGEM3Embeddings` — loads BGE-M3 model, generates dense+sparse vectors |
-| `src/core/vector_store.py` | `VectorStoreService` — Milvus connection, collection schema (HNSW index) |
-| `src/services/search.py` | `SearchService` (similarity search) + `ChatService` (ConversationalRetrievalChain) |
-| `src/services/ingest.py` | `IngestService` — document loading (PDF/DOCX/TXT), chunking, Milvus ingestion |
-| `src/api/routers/chat.py` | `/api/chat` endpoint with in-memory session storage |
+| `src/core/config.py` | Settings via Pydantic — Milvus URI, LLM API keys, model names, collection names |
+| `src/core/embeddings.py` | `embedding_service` — wraps Ollama embedding API or local model |
+| `src/core/vector_store.py` | `vector_store_service` — Milvus connection and health checks |
+| `src/core/prompt.py` | Chat prompt template for vulnerability Q&A |
+| `src/services/search.py` | `SearchService` (hybrid BM25 + dense RRF search) + `ChatService` (LLM chain) |
+| `src/services/ingest.py` | `IngestService` — document loading, chunking, Milvus ingestion |
+| `src/services/session_store.py` | SQLite-based session persistence |
+| `src/api/routers/chat.py` | `/api/chat` endpoint with session support |
 | `src/api/routers/ingest.py` | `/api/ingest` endpoint for file uploads |
+| `src/models/schemas.py` | Pydantic models: `SourceDoc`, `ChatRequest`, `ChatResponse`, `HealthResponse` |
+
+## Search Architecture
+
+`SearchService` performs **hybrid search**:
+1. **Dense vector search** — queries Milvus HNSW index
+2. **BM25 sparse search** — in-memory `rank_bm25.BM25Okapi` on corpus
+3. **RRF fusion** — `score = 1/(k + dense_rank) + 1/(k + bm25_rank)` with `k=60`
+
+The `_hybrid_search` method auto-detects collection schema (text field, vector field, metric type, primary key).
 
 ## Vector Store Schema
 
-Milvus collection `customer_service_kb` uses HNSW index with COSINE similarity. Schema includes fields: `id`, `chunk_text`, `plugin_id`, `plugin_name`, `description`, `category`, `cvss3`, etc.
+- `vuln_kb` (default): single `vector` field (1024-dim), HNSW index, COSINE metric
+- `plugins` collection: separate `dense_vector` and `sparse_vector` fields for hybrid search
 
-The `plugins` collection uses a different schema with separate `dense_vector` (1024-dim) and `sparse_vector` fields for hybrid search.
+Auto-detection logic in `SearchService._get_*` methods handles varying schemas.
 
 ## Environment Variables
 
@@ -97,8 +112,12 @@ Key variables in `.env`:
 - `MILVUS_URI` — Milvus server URI (default: `http://milvus:19530`)
 - `OPENAI_API_KEY` / `OPENAI_API_BASE` — LLM API credentials
 - `OPENAI_MODEL` — LLM model name (default: `MiniMax-M2.7`)
-- `EMBEDDING_MODEL` — Path to BGE-M3 model (default: `models/bge-m3`)
-- `DEFAULT_COLLECTION` — Default Milvus collection name
+- `OLLAMA_BASE_URL` — Ollama server (default: `http://localhost:11434`)
+- `OLLAMA_EMBEDDING_MODEL` — Ollama embedding model (default: `qwen3-embedding:0.6b-q8_0`)
+- `DEFAULT_COLLECTION` — Default Milvus collection (default: `vuln_kb`)
+- `TOP_K` — Retrieval return count (default: `5`)
+- `SESSION_DB_PATH` — SQLite session storage path (default: `data/sessions.db`)
+- `SESSION_MAX_HISTORY` — Max chat history messages per session (default: `20`)
 
 ## API Endpoints
 
@@ -111,9 +130,11 @@ Key variables in `.env`:
 
 ## Data Ingestion Formats
 
-The `ingest_data.py` script auto-detects format by extension:
+`ingest_data.py` auto-detects format by extension:
 - `.pdf` / `.docx` / `.txt` — document loaders
 - `.xml` — if contains `<RECORD>` with `pluginid` → plugins format; otherwise FAQ format
 - `.json` — structured JSON
 - `.md` — Markdown (split by headings/paragraphs)
 - `.db` / `.sqlite` / `.sqlite3` — SQLite database tables
+
+`ingest_plugins.py` is specialized for plugin XML with dense + sparse vector generation.

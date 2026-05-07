@@ -58,7 +58,7 @@ export default function MessageList({ messages, isLoading }: Props) {
             </div>
           ))}
 
-          {isLoading && (
+          {isLoading && messages.length > 0 && messages[messages.length - 1].role === 'user' && (
             <div className="flex justify-start animate-fade-in">
               <div className="glass rounded-2xl rounded-bl-md px-5 py-3.5 shadow-sm">
                 <div className="loading-dots">

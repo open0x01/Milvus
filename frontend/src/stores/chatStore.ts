@@ -13,14 +13,28 @@ export interface Message {
   content: string
   sources?: SourceDoc[]
   timestamp: Date
+  streaming?: boolean
+}
+
+function getOrCreateUserId(): string {
+  const key = 'rag_user_id'
+  let userId = localStorage.getItem(key)
+  if (!userId) {
+    userId = crypto.randomUUID()
+    localStorage.setItem(key, userId)
+  }
+  return userId
 }
 
 interface ChatStore {
   messages: Message[]
   sessionId: string | null
+  userId: string
   sessions: SessionInfo[]
   isLoading: boolean
   addMessage: (msg: Message) => void
+  updateStreamingMessage: (id: string, token: string) => void
+  finalizeStreamingMessage: (id: string, sources?: SourceDoc[]) => void
   setLoading: (loading: boolean) => void
   setSessionId: (sessionId: string) => void
   resetChat: () => void
@@ -33,10 +47,21 @@ interface ChatStore {
 export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   sessionId: null,
+  userId: getOrCreateUserId(),
   sessions: [],
   isLoading: false,
   addMessage: (msg) => set((state) => ({
     messages: [...state.messages, msg]
+  })),
+  updateStreamingMessage: (id, token) => set((state) => ({
+    messages: state.messages.map((msg) =>
+      msg.id === id ? { ...msg, content: msg.content + token } : msg
+    )
+  })),
+  finalizeStreamingMessage: (id, sources) => set((state) => ({
+    messages: state.messages.map((msg) =>
+      msg.id === id ? { ...msg, streaming: false, sources } : msg
+    )
   })),
   setLoading: (loading) => set({ isLoading: loading }),
   setSessionId: (sessionId) => set({ sessionId }),
@@ -58,6 +83,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         role: h.role as 'user' | 'assistant',
         content: h.content,
         timestamp: new Date(),
+        streaming: false,
       }))
       set({ sessionId, messages: msgs })
     } catch (e) {

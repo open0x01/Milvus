@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { useChat } from '../api/chat'
+import { useState, useEffect, useCallback } from 'react'
+import { sendStreamMessage } from '../api/chat'
 import { useChatStore } from '../stores/chatStore'
 import MessageList from './MessageList'
 import ChatInput from './ChatInput'
@@ -7,35 +7,67 @@ import ChatInput from './ChatInput'
 export default function ChatInterface() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const { messages, sessionId, sessions, resetChat, loadSessions, switchSession, removeSession } = useChatStore()
-  const chatMutation = useChat()
+  const [isStreaming, setIsStreaming] = useState(false)
 
   useEffect(() => {
     loadSessions()
   }, [])
 
-  useEffect(() => {
-    if (chatMutation.isSuccess) {
-      loadSessions()
-    }
-  }, [chatMutation.isSuccess])
+  const handleSend = useCallback(async (question: string) => {
+    const store = useChatStore.getState()
+    const assistantMsgId = crypto.randomUUID()
 
-  const handleSend = async (question: string) => {
-    useChatStore.getState().addMessage({
+    store.addMessage({
       id: crypto.randomUUID(),
       role: 'user',
       content: question,
       timestamp: new Date(),
     })
 
+    store.addMessage({
+      id: assistantMsgId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      streaming: true,
+    })
+
+    setIsStreaming(true)
+
+    let sources: any[] | undefined
+
     try {
-      await chatMutation.mutateAsync({
-        question,
-        session_id: sessionId || undefined,
-      })
+      await sendStreamMessage(
+        {
+          question,
+          session_id: store.sessionId || undefined,
+          user_id: store.userId,
+        },
+        (srcs, sid) => {
+          sources = srcs
+          useChatStore.getState().setSessionId(sid)
+        },
+        (token) => {
+          useChatStore.getState().updateStreamingMessage(assistantMsgId, token)
+        },
+        (_answer, sid) => {
+          useChatStore.getState().finalizeStreamingMessage(assistantMsgId, sources)
+          useChatStore.getState().setSessionId(sid)
+          setIsStreaming(false)
+          loadSessions()
+        },
+        (error) => {
+          console.error('Stream error:', error)
+          useChatStore.getState().finalizeStreamingMessage(assistantMsgId, sources)
+          setIsStreaming(false)
+        }
+      )
     } catch (error) {
       console.error('Chat error:', error)
+      useChatStore.getState().finalizeStreamingMessage(assistantMsgId, sources)
+      setIsStreaming(false)
     }
-  }
+  }, [])
 
   const handleNewChat = () => {
     resetChat()
@@ -178,9 +210,9 @@ export default function ChatInterface() {
           </div>
         </header>
 
-        <MessageList messages={messages} isLoading={chatMutation.isPending} />
+        <MessageList messages={messages} isLoading={isStreaming} />
 
-        <ChatInput onSend={handleSend} disabled={chatMutation.isPending} />
+        <ChatInput onSend={handleSend} disabled={isStreaming} />
       </div>
     </div>
   )

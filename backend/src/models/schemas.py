@@ -5,6 +5,7 @@ from typing import Optional
 class ChatRequest(BaseModel):
     question: str = Field(..., description="用户问题")
     session_id: Optional[str] = Field(None, description="会话ID")
+    user_id: Optional[str] = Field(None, description="用户ID，用于跨会话长期记忆")
     top_k: int = Field(5, description="检索数量")
 
 

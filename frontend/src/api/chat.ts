@@ -1,16 +1,10 @@
-import { useMutation } from '@tanstack/react-query'
-import { useChatStore, SourceDoc } from '../stores/chatStore'
+import { SourceDoc } from '../stores/chatStore'
 
 interface ChatRequest {
   question: string
   session_id?: string
+  user_id?: string
   top_k?: number
-}
-
-interface ChatResponse {
-  answer: string
-  sources: SourceDoc[]
-  session_id: string
 }
 
 export interface SessionInfo {
@@ -22,18 +16,64 @@ export interface SessionInfo {
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
-export const sendMessage = async (req: ChatRequest): Promise<ChatResponse> => {
-  const res = await fetch(`${API_BASE}/chat`, {
+export async function sendStreamMessage(
+  req: ChatRequest,
+  onSources: (sources: SourceDoc[], sessionId: string) => void,
+  onToken: (token: string) => void,
+  onDone: (answer: string, sessionId: string) => void,
+  onError: (error: string) => void
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   })
 
   if (!res.ok) {
-    throw new Error('Failed to send message')
+    onError('Failed to send message')
+    return
   }
 
-  return res.json()
+  const reader = res.body?.getReader()
+  if (!reader) {
+    onError('No response body')
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data: ')) continue
+
+      const jsonStr = trimmed.slice(6)
+      try {
+        const data = JSON.parse(jsonStr)
+
+        if (data.type === 'sources') {
+          onSources(data.sources, data.session_id)
+        } else if (data.type === 'token') {
+          onToken(data.content)
+        } else if (data.type === 'done') {
+          onDone(data.answer, data.session_id)
+        } else if (data.type === 'error') {
+          onError(data.content)
+        }
+      } catch {
+        // skip malformed JSON
+      }
+    }
+  }
 }
 
 export async function fetchSessions(): Promise<SessionInfo[]> {
@@ -52,33 +92,4 @@ export async function fetchChatHistory(sessionId: string): Promise<{ session_id:
 export async function deleteChatHistory(sessionId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/chat/history/${sessionId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error('Failed to delete chat history')
-}
-
-export function useChat() {
-  const { addMessage, setLoading, setSessionId } = useChatStore()
-
-  return useMutation({
-    mutationFn: sendMessage,
-    onMutate: () => {
-      setLoading(true)
-    },
-    onSuccess: (data) => {
-      addMessage({
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: data.answer,
-        sources: data.sources,
-        timestamp: new Date(),
-      })
-
-      if (data.session_id) {
-        setSessionId(data.session_id)
-      }
-
-      setLoading(false)
-    },
-    onError: () => {
-      setLoading(false)
-    },
-  })
 }
